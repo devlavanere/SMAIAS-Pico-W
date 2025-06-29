@@ -19,34 +19,14 @@ include(pico_sdk_import.cmake)
 project(smaias_pico_w_project C CXX ASM)
 pico_sdk_init()
 
-# Fonte programa principal
-set(APP_SOURCES
+# Executável
+add_executable(${PROJECT_NAME}
     src/main.c
 )
-
-# Fontes biblioteca externa (OLED)
-set(LIB_SSD1306_SOURCES
-    lib/ssd1306/ssd1306.c
-)
-
-# Fontes arquivos .pio
-set(PIO_SOURCES
-     ${CMAKE_CURRENT_SOURCE_DIR}/src/ws2812.pio
-)
-
-# Executável principal com TODOS os arquivos-fonte
-add_executable(${PROJECT_NAME}
-    ${APP_SOURCES}
-    ${LIB_SSD1306_SOURCES}
-)
-
-# Geração do header do PIO.
-pico_generate_pio_header(${PROJECT_NAME} ${PIO_SOURCES})
 
 # Adicionando os diretórios de include.
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
 
 # Link de todas as bibliotecas necessárias.
@@ -54,10 +34,6 @@ target_link_libraries(${PROJECT_NAME}
     pico_stdlib
     hardware_gpio
     hardware_adc
-    hardware_pwm
-    hardware_i2c
-    hardware_pio
-    hardware_clocks 
 )
 
 # Configurações de saída
