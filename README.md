@@ -12,48 +12,41 @@ O sistema utiliza o microfone embutido para detectar níveis sonoros elevados. A
 *   **SDK:** Raspberry Pi Pico SDK
 *   **Protocolo de Comunicação:** MQTT
 
-## Fase 3: Interface do Usuário (UI)
+## Fase 4: Conectividade Wi-Fi e MQTT
 
 ### Objetivo da Fase
 
-O objetivo desta fase foi transformar o SMAIAS em um dispositivo autônomo e interativo, adicionando uma interface de usuário local. Isso foi alcançado integrando um display OLED e lendo as entradas do joystick e botões da placa BitDogLab.
-
-O núcleo de monitoramento de áudio da Fase 2 foi mantido e agora suas informações são exibidas visualmente para o usuário.
+O objetivo desta fase foi transformar o SMAIAS de um dispositivo local em um verdadeiro dispositivo de Internet das Coisas (IoT). A meta era implementar a conectividade Wi-Fi para conectar o sistema a uma rede e, em seguida, usar o protocolo MQTT para publicar mensagens de alerta em um broker, permitindo que cuidadores sejam notificados remotamente.
 
 ### Funcionalidades Implementadas
 
-1.  **Integração do Display OLED:**
-    *   O display OLED (baseado no controlador SSD1306) foi inicializado e configurado para comunicação via I2C.
-    *   Foi utilizada a biblioteca `pico-ssd1306` para abstrair as operações de desenho.
+1.  **Conectividade Wi-Fi:**
+    *   O módulo Wi-Fi do chip CYW43 na Raspberry Pi Pico W foi inicializado no modo `STA` (Station), permitindo que ele se conecte a um ponto de acesso existente.
+    *   As credenciais da rede (SSID e senha) são gerenciadas através do arquivo de configuração `config.h`.
 
-2.  **Visualização de Status em Tempo Real:**
-    *   A tela principal exibe continuamente o nome do projeto ("SMAIAS").
-    *   Mostra o **nível de ruído (RMS)** atual, lido do microfone.
-    *   Mostra o **limiar de sensibilidade** configurado.
-    *   Exibe o status do sistema: "Monitorando..." em estado normal e um grande **"ALERTA!"** quando o nível de ruído ultrapassa o limiar.
+2.  **Cliente MQTT:**
+    *   Foi integrado um cliente MQTT utilizando a biblioteca LwIP (Lightweight IP), que faz parte da Pico SDK.
+    *   O sistema foi configurado para se conectar a um broker MQTT (para testes, foi utilizado o `broker.hivemq.com` e um broker local Mosquitto).
 
-3.  **Sistema de Menus e Navegação:**
-    *   Foi implementada uma máquina de estados simples com duas telas: `SCREEN_MAIN` (principal) e `SCREEN_SETTINGS` (ajustes).
-    *   O **botão do joystick (SW)** é usado para navegar da tela principal para a tela de ajustes.
+3.  **Publicação de Alertas Remotos:**
+    *   Quando um evento de alerta é disparado (nível de som ultrapassa o limiar), o sistema agora formata uma mensagem JSON contendo o nível do som detectado.
+    *   Esta mensagem é publicada no tópico MQTT pré-definido (`MQTT_TOPIC_ALERT`), tornando o alerta acessível a qualquer cliente MQTT (como um aplicativo de celular ou um dashboard) subscrito a este tópico.
 
-4.  **Configuração de Sensibilidade no Dispositivo:**
-    *   Na tela de ajustes, o **eixo Y do joystick** é utilizado para aumentar ou diminuir o valor da variável `sound_threshold`.
-    *   O **Botão A** é usado para "salvar" (confirmar) o novo valor e retornar à tela principal.
-    *   Isso permite que o usuário calibre a sensibilidade do SMAIAS diretamente no hardware, sem a necessidade de um computador ou de recompilar o código.
+4.  **Feedback Visual de Conectividade:**
+    *   A interface do usuário no display OLED foi aprimorada para mostrar o status da conexão MQTT, exibindo "Conectando..." durante a tentativa e "OK" ou "Conectado" após o sucesso.
+    *   O LED RGB também foi programado para refletir o status da rede, fornecendo um feedback rápido e intuitivo.
 
-### Detalhes Técnicos
+### Desafios Técnicos e Soluções
 
-*   **Pinos Utilizados (Novos nesta Fase):**
-    *   `GPIO14` (SDA) e `GPIO15` (SCL) para o barramento I2C do display OLED.
-    *   `GPIO26` (ADC0) para o eixo Y do joystick.
-    *   `GPIO22` para o botão de switch do joystick.
-    *   `GPIO5` para o Botão A.
+Durante esta fase, foram encontrados desafios significativos de conectividade, cuja resolução foi uma parte crucial do processo de desenvolvimento:
 
-*   **Lógica de Controle:**
-    *   O `main loop` foi reestruturado para seguir um fluxo claro:
-        1.  `handle_input()`: Processar as entradas do usuário primeiro.
-        2.  `get_sound_level()`: Ler os sensores e atualizar a lógica de alerta.
-        3.  `draw_screen()`: Atualizar todos os atuadores (LEDs e display) com o novo estado do sistema.
+*   **Problema 1: Falha na Conexão Wi-Fi com Roteador Doméstico (`Erro -2: Rede não encontrada`)**
+    *   **Diagnóstico:** Mesmo com as credenciais corretas, a Pico W não conseguia se conectar à rede principal. Para isolar o problema, o dispositivo foi testado no modo Access Point (AP), o que funcionou perfeitamente, provando que o hardware de rádio estava funcional.
+    *   **Solução:** O problema foi contornado com sucesso utilizando um **hotspot de celular como ponto de acesso**. Isso indicou que a falha original se devia a uma incompatibilidade de configuração (provavelmente canal ou largura de canal) com o roteador doméstico.
+
+*   **Problema 2: Falha na Conexão MQTT com Broker Público (`Erro 256: Conexão Recusada`)**
+    *   **Diagnóstico:** Após conectar-se ao Wi-Fi, a conexão com o broker `broker.hivemq.com` falhava. As causas comuns (Client ID duplicado, polling da rede) foram investigadas.
+    *   **Solução:** A solução definitiva foi refatorar a lógica de conexão para ser **assíncrona**. Em vez de tentar uma conexão MQTT imediatamente após a conexão Wi-Fi, o código agora utiliza o **cliente DNS da LwIP (`dns_gethostbyname`)** para primeiro resolver o nome do host do broker. A conexão MQTT é iniciada somente após o sucesso da resolução de DNS, através de uma função de callback. Esta abordagem eliminou problemas de temporização e garantiu uma conexão robusta.
 
 O desenvolvimento do projeto está sendo realizado em fases. O status atual é:
 
@@ -69,11 +62,20 @@ O desenvolvimento do projeto está sendo realizado em fases. O status atual é:
   - *Descrição:* Desenvolvimento da interface no display OLED para visualização de status e configuração do limiar de sensibilidade através do joystick.
   - *Tag no Git:* `v2.0-fase3`
 
-- [ ] **Fase 4: Conectividade MQTT**
+- [x] **Fase 4: Conectividade MQTT**
   - *Descrição:* Implementação da conexão Wi-Fi e envio de alertas remotos via protocolo MQTT.
 
 - [ ] **Fase 5: Integração Final e Refatoração**
   - *Descrição:* Combinação de todos os módulos (incluindo buzzer e matriz de LEDs nos alertas) e refatoração do código para uma arquitetura modular e limpa.
+
+## Próximos Passos (Fase 5)
+
+Com a funcionalidade de ponta a ponta (detecção -> alerta local -> alerta remoto) validada, a próxima e última fase se concentrará em:
+1.  Integrar os atuadores de alerta restantes (Buzzer e Matriz de LEDs).
+2.  Refatorar o código-fonte monolítico para uma arquitetura modular limpa e profissional.
+
+---
+_**Status:** Concluída. O protótipo é agora um dispositivo IoT funcional, capaz de enviar notificações remotas em tempo real._
 
 ## Como Compilar
 

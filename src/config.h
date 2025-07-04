@@ -33,4 +33,13 @@
 #define WS2812_PIN 7
 #define WS2812_NUM_LEDS 16 // Matriz 4x4
 
+// --- Configurações de Rede ---
+#define WIFI_SSID "PicowTest"
+#define WIFI_PASSWORD "aa5904bed354"
+
+// -- Configurações do Broker MQTT ---
+#define MQTT_BROKER_HOST "broker.hivemq.com"
+#define MQTT_CLIENT_ID "mqtt-explorer-ed0ebfed_1"
+#define MQTT_BROKER_PORT 1883
+#define MQTT_TOPIC_ALERT "smaias/alerta/michelsampaio_12345"
 #endif

@@ -1,12 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
 
 #include "pico/stdlib.h"
+#include "pico/cyw43_arch.h"
 #include "hardware/gpio.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
 #include "config.h"
+
+// Bibliotecas de Rede
+#include "lwip/apps/mqtt.h"
+#include "lwip/dns.h" 
+#include "lwipopts.h"
 
 // Biblioteca do display OLED
 #include "ssd1306/ssd1306.h"
@@ -14,6 +21,14 @@
 // ==================================================================
 // SEÇÃO DE CONFIGURAÇÃO E ESTADO GLOBAL
 // ==================================================================
+
+// --- Estrutura e Variável Global para o Estado do MQTT ---
+typedef struct MQTT_STATE_T {
+    ip_addr_t remote_addr;
+    mqtt_client_t *mqtt_client;
+    bool connected;
+} MQTT_STATE_T;
+static MQTT_STATE_T mqtt_state;
 
 // --- Estado do Sistema ---
 typedef enum {
@@ -30,9 +45,95 @@ static float sound_threshold = 150.0f; // Limiar agora é uma variável para pod
 // --- Objeto do Display ---
 static ssd1306_t disp;
 
-// ======================================================================
+// --- DEFINIÇÃO DA FUNÇÃO DE CALLBACK PARA O SCAN ---
+
+static int scan_result(void *env, const cyw43_ev_scan_result_t *result);
+
+static int scan_result(void *env, const cyw43_ev_scan_result_t *result) {
+    if (result) {
+        printf("SSID: %-32s | RSSI: %4d | Canal: %3d | MAC: %02x:%02x:%02x:%02x:%02x:%02x | Seg: %d\n",
+            result->ssid, result->rssi, result->channel,
+            result->bssid[0], result->bssid[1], result->bssid[2], result->bssid[3], result->bssid[4], result->bssid[5],
+            result->auth_mode);
+    }
+    return 0;
+}
+
+// =================================================================================
+// SEÇÃO DE REDE E MQTT
+// =================================================================================
+static void mqtt_connection_cb(mqtt_client_t *client, void *arg, mqtt_connection_status_t status) {
+    if (status == MQTT_CONNECT_ACCEPTED) {
+        printf("MQTT: Conectado com sucesso!\n");
+        mqtt_state.connected = true;
+    } else {
+        printf("MQTT: Falha na conexao, codigo: %d\n", status);
+        mqtt_state.connected = false;
+    }
+}
+
+static void dns_mqtt_found(const char *name, const ip_addr_t *ipaddr, void *arg) {
+    if (!ipaddr) {
+        printf("DNS: falha ao resolver %s\n", MQTT_BROKER_HOST);
+        return;
+    }
+    printf("DNS: %s -> %s\n", name, ip4addr_ntoa(ipaddr));
+    mqtt_state.remote_addr = *ipaddr;
+
+    struct mqtt_connect_client_info_t ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.client_id = MQTT_CLIENT_ID;
+    ci.keep_alive = 60;
+
+    mqtt_client_connect(mqtt_state.mqtt_client,
+                        &mqtt_state.remote_addr,
+                        MQTT_BROKER_PORT,
+                        mqtt_connection_cb, NULL, &ci);
+}
+
+static void mqtt_init(void) {
+    mqtt_state.mqtt_client = mqtt_client_new();
+    if (mqtt_state.mqtt_client == NULL) {
+        printf("Erro ao criar cliente MQTT.\n");
+        return;
+    }
+
+    struct mqtt_connect_client_info_t ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.client_id = MQTT_CLIENT_ID;
+    ci.keep_alive = 60;
+
+    err_t err = dns_gethostbyname(MQTT_BROKER_HOST, &mqtt_state.remote_addr, dns_mqtt_found, NULL);
+
+    if (err == ERR_OK) {
+        // IP está em cache DNS
+        printf("DNS: em cache -> %s\n", ip4addr_ntoa(&mqtt_state.remote_addr));
+        mqtt_client_connect(mqtt_state.mqtt_client,
+                            &mqtt_state.remote_addr,
+                            MQTT_BROKER_PORT,
+                            mqtt_connection_cb, NULL, &ci);
+    } else if (err == ERR_INPROGRESS) {
+        printf("DNS: resolvendo %s…\n", MQTT_BROKER_HOST);
+        // A conexão será feita no callback dns_mqtt_found()
+    } else {
+        printf("DNS: erro %d ao resolver hostname\n", err);
+    }
+}
+
+
+static void publish_alert(float sound_level) {
+    if (!mqtt_state.connected) { return; }
+
+    char payload[64];
+    snprintf(payload, sizeof(payload), "{\"device_id\":\"%s\",\"level\":%.1f}", MQTT_CLIENT_ID, sound_level);
+    
+    mqtt_publish(mqtt_state.mqtt_client, MQTT_TOPIC_ALERT, payload, strlen(payload), 1, 0, NULL, NULL);
+    printf("MQTT: Alerta publicado.\n");
+}
+
+// =================================================================================
 // SEÇÃO DE PROCESSAMENTO DE ÁUDIO (FASE 2)
-// ======================================================================
+// =================================================================================
 static float get_sound_level() {
     uint16_t samples[SAMPLE_COUNT];
     uint32_t sum = 0;
@@ -91,10 +192,16 @@ static void draw_main_screen(float current_sound_level, bool is_alert_active) {
     ssd1306_draw_string(&disp, 0, 0, 2, "SMAIAS");
     sprintf(buf, "Nivel:%.0f Lim:%.0f", current_sound_level, sound_threshold);
     ssd1306_draw_string(&disp, 0, 24, 1, buf);
+
     if (is_alert_active) {
         ssd1306_draw_string(&disp, 0, 48, 2, "ALERTA!");
     } else {
-        ssd1306_draw_string(&disp, 0, 48, 1, "Monitorando...");
+       // Mostra o status da conexão MQTT
+        if (mqtt_state.connected) {
+            ssd1306_draw_string(&disp, 0, 48, 1, "Conectado");
+        } else {
+            ssd1306_draw_string(&disp, 0, 48, 1, "Conectando...");
+        }
     }
 }
 
@@ -158,9 +265,52 @@ int main() {
         sleep_ms(100);
     }
 
-    printf("\n--- SMAIAS: FASE 3 - INTERFACE DE USUARIO ---\n");
+    printf("\n--- SMAIAS: FASE 4 - CONECTIVIDADE MQTT ---\n");
 
-    // --- Inicialização dos Periféricos ---
+    // --- Inicialização dos Periféricos e Rede ---
+    if (cyw43_arch_init()) {
+        printf("Falha ao inicializar o modulo Wi-Fi.\n");
+        return -1;
+    }
+    cyw43_arch_enable_sta_mode();
+
+    printf("Tentando conectar a rede: %s ...\n", WIFI_SSID);
+
+    int connection_status = cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 15000);
+
+    if (connection_status != 0) {
+        printf("Falha ao conectar. Codigo de erro: %d\n", connection_status);
+        printf("\n--- INICIANDO SCAN DE REDES WI-FI VISIVEIS ---\n");
+        
+        // Inicia um scan de Wi-Fi. A função 'scan_result' será chamada para cada rede encontrada.
+        cyw43_wifi_scan_options_t scan_options = {0};
+        int err = cyw43_wifi_scan(&cyw43_state, &scan_options, NULL, scan_result);
+        
+        if (err == 0) {
+            printf("\nScan iniciado. Aguardando resultados...\n");
+            sleep_ms(10000); // Espera 10 segundos para o scan completar
+        } else {
+            printf("Nao foi possivel iniciar o scan. Erro: %d\n", err);
+        }
+        
+        printf("\n--- DIAGNOSTICO CONCLUIDO. TRAVANDO O PROGRAMA. ---\n");
+        printf("Verifique na lista acima se a sua rede '%s' aparece.\n", WIFI_SSID);
+        
+        while(true) { // Trava o programa aqui
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+            sleep_ms(500);
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+            sleep_ms(500);
+        }
+    }
+    // Se o código chegou até aqui, a conexão foi bem-sucedida.
+    printf("Conectado ao Wi-Fi com sucesso!\n");
+
+    printf("Aguardando estabilizacao da rede (2s)...\n");
+    sleep_ms(2000);
+    
+    mqtt_init();
+
     // 1. ADC para o microfone
     adc_init();
     adc_gpio_init(MIC_ADC_PIN);
@@ -176,18 +326,30 @@ int main() {
     // Inicializa a UI
     ui_init();
     
-    printf("Sistema ativo. UI e monitoramento de audio operacionais.\n");
+    printf("Sistema ativo. Aguardando conexao MQTT...\n");
 
-    // --- Loop Principal de Monitoramento ---
+    // --- Loop Principal ---
+    
+    bool alert_sent_this_event = false;
+
     while(true) {
-        // 1. Processar entradas do usuário 
         handle_input();
 
-        // 2. Ler sensores e atualizar a lógica
+        // Ler sensores e atualizar a lógica
         float sound_level = get_sound_level();
         bool alert_triggered = sound_level > sound_threshold;
 
-        // 3. Atualizar atuadores (LEDs e Display)
+        if (alert_triggered) {
+            // Publica o alerta apenas uma vez por evento
+            if (!alert_sent_this_event) {
+                publish_alert(sound_level);
+                alert_sent_this_event = true;
+            }
+        } else {
+            alert_sent_this_event = false; // Reseta o flag quando o som volta ao normal
+        }
+
+        // Atualizar atuadores (LEDs e Display)
         gpio_put(RGB_R_PIN, alert_triggered);
         gpio_put(RGB_G_PIN, !alert_triggered);
         
